@@ -1,0 +1,33 @@
+{
+  "cap_id": "123e4567-e89b-12d3-a456-426614174000",
+  "timestamp": "2026-01-17T00:00:00Z",
+  "domain": "Research",
+  "context_mode": "Advisor",
+  "advisor_of_record": "HUMAN",
+  "integrity": {
+    "signature_status": "unsigned",
+    "root_hash_reference": "SHA256:d92c6f8487b5a10b1d146c14bfd22164aff71a0d4f4ecb429c69ff33933de603",
+    "audit_source": "local"
+  },
+  "outputs": {
+    "summary": "Testing integrity validation pipeline.",
+    "confidence": "High",
+    "evidence": [
+      {
+        "claim": "The CAP validation system executes successfully in local test mode.",
+        "support": "Validated via local_integrity_check.py run output.",
+        "source_type": "file",
+        "source_ref": "/scripts/local_integrity_check.py"
+      }
+    ],
+    "limitations": [
+      "Bridge relay unauthorized in local mode",
+      "No validator mesh signature in test run"
+    ],
+    "recommendations": [
+      "Proceed to configure Render bridge token for authenticated CAP relay.",
+      "Enable GitHub Actions automation via integrity_manual_v6.yml workflow."
+    ]
+  },
+  "cap_extensions": {}
+}
