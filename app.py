@@ -1,26 +1,27 @@
 from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, Any
-import hashlib, hmac, json, os, datetime, requests, uuid, time, asyncio, shutil
+import hashlib, hmac, json, os, datetime, requests, uuid, time, asyncio, shutil, gzip
 from collections import defaultdict
 from pathlib import Path
 
-app = FastAPI(title="Athena CAP Bridge v2", version="2.4")
+app = FastAPI(title="Athena CAP Bridge v2.5", version="2.5")
 
 # =========================================================
 # Configuration
 # =========================================================
 SHARED_SECRET = os.getenv("ATHENA_SHARED_SECRET", "super_secret_shared_key_123!")
 BRIDGE_URL = os.getenv("BRIDGE_URL", None)
-RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))  # requests/IP/min
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))
 LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOG_DIR / "bridge_log.jsonl"
-MAX_LOG_LINES = int(os.getenv("MAX_LOG_LINES", "1000"))  # keep last 1000
-ARCHIVE_DAYS = int(os.getenv("ARCHIVE_DAYS", "7"))  # keep archives for 7 days
+MAX_LOG_LINES = int(os.getenv("MAX_LOG_LINES", "1000"))
+ARCHIVE_DAYS = int(os.getenv("ARCHIVE_DAYS", "7"))
 
 # =========================================================
-# Rate limiting
+# Rate Limiting
 # =========================================================
 rate_bucket = defaultdict(lambda: {"tokens": RATE_LIMIT, "timestamp": time.time()})
 
@@ -50,31 +51,34 @@ class CAPPayload(BaseModel):
     integrity: Any
 
 # =========================================================
-# Logging helpers
+# Logging Helpers
 # =========================================================
 def rotate_logs():
-    """Rotate daily logs and prune archives older than ARCHIVE_DAYS."""
+    """Rotate and compress daily logs; prune old archives."""
     today = datetime.date.today().isoformat()
     archive_path = LOG_DIR / f"bridge_log_{today}.jsonl"
 
-    # If current log exists and not already archived, rotate
+    # Rotate yesterday’s file
     if LOG_PATH.exists():
-        # Only rotate if it's a new day and archive not yet created
         mtime = datetime.date.fromtimestamp(LOG_PATH.stat().st_mtime)
-        if mtime < datetime.date.today():
+        if mtime < datetime.date.today() and not archive_path.exists():
             shutil.move(str(LOG_PATH), str(archive_path))
+            # Compress archive
+            with open(archive_path, "rb") as src, gzip.open(f"{archive_path}.gz", "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            archive_path.unlink()  # remove uncompressed
 
-    # Clean old archives
-    for f in LOG_DIR.glob("bridge_log_*.jsonl"):
+    # Prune archives older than ARCHIVE_DAYS
+    for f in LOG_DIR.glob("bridge_log_*.jsonl.gz"):
         try:
-            date_part = f.stem.replace("bridge_log_", "")
+            date_part = f.stem.replace("bridge_log_", "").replace(".jsonl", "")
             if (datetime.date.today() - datetime.date.fromisoformat(date_part)).days > ARCHIVE_DAYS:
                 f.unlink()
         except Exception:
             continue
 
 def prune_logs():
-    """Keep only the last N lines in the current log file."""
+    """Keep only the last N lines."""
     try:
         if not LOG_PATH.exists():
             return
@@ -82,10 +86,9 @@ def prune_logs():
         if len(lines) > MAX_LOG_LINES:
             LOG_PATH.write_text("\n".join(lines[-MAX_LOG_LINES:]) + "\n")
     except Exception as e:
-        print(f"[WARN] Failed to prune logs: {e}")
+        print(f"[WARN] Log prune failed: {e}")
 
 def log_json(event: str, data: dict):
-    """Structured JSON logger."""
     entry = {"event": event, "time": datetime.datetime.utcnow().isoformat(), **data}
     try:
         rotate_logs()
@@ -97,7 +100,7 @@ def log_json(event: str, data: dict):
     print(json.dumps(entry), flush=True)
 
 # =========================================================
-# Metrics & Health
+# Metrics
 # =========================================================
 metrics = {
     "start_time": datetime.datetime.utcnow().isoformat(),
@@ -125,9 +128,21 @@ def healthz():
 def get_metrics():
     return metrics
 
-@app.get("/")
-def root():
-    return {"status": "alive", "time": datetime.datetime.utcnow().isoformat()}
+@app.get("/status")
+def status():
+    """Summarized operational health snapshot."""
+    uptime = (
+        datetime.datetime.utcnow()
+        - datetime.datetime.fromisoformat(metrics["start_time"])
+    ).total_seconds()
+    return {
+        "uptime_seconds": uptime,
+        "rate_limit": RATE_LIMIT,
+        "archive_days": ARCHIVE_DAYS,
+        "bridge_url": BRIDGE_URL or "none",
+        "logs_count": len(list(LOG_DIR.glob("bridge_log_*.jsonl.gz"))),
+        "active_log_size_bytes": LOG_PATH.stat().st_size if LOG_PATH.exists() else 0,
+    }
 
 # =========================================================
 # CAP Receiver
@@ -183,11 +198,11 @@ async def receive_cap(request: Request, x_athena_signature: Optional[str] = Head
     }
 
 # =========================================================
-# Logs endpoint
+# Log Retrieval APIs
 # =========================================================
 @app.get("/logs")
 def read_logs():
-    """Retrieve recent and archived logs summary."""
+    """Retrieve last 20 structured logs + archive list."""
     current_logs = []
     if LOG_PATH.exists():
         with open(LOG_PATH, "r") as f:
@@ -195,6 +210,27 @@ def read_logs():
 
     archives = [
         {"file": f.name, "modified": datetime.datetime.utcfromtimestamp(f.stat().st_mtime).isoformat()}
-        for f in sorted(LOG_DIR.glob("bridge_log_*.jsonl"), reverse=True)
+        for f in sorted(LOG_DIR.glob("bridge_log_*.jsonl.gz"), reverse=True)
     ]
     return {"current": current_logs, "archives": archives}
+
+@app.get("/archive/{date}")
+def get_archive(date: str):
+    """Download archived log for specific date (ISO format YYYY-MM-DD)."""
+    archive = LOG_DIR / f"bridge_log_{date}.jsonl.gz"
+    if not archive.exists():
+        raise HTTPException(status_code=404, detail=f"No archive found for {date}")
+    return FileResponse(str(archive), media_type="application/gzip", filename=archive.name)
+
+# =========================================================
+# Root
+# =========================================================
+@app.get("/")
+def root():
+    return {
+        "service": "Athena Bridge v2.5",
+        "version": "2.5",
+        "status": "operational",
+        "docs": "/docs",
+        "time": datetime.datetime.utcnow().isoformat(),
+    }
