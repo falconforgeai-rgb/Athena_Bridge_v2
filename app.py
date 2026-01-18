@@ -3,22 +3,24 @@ from pydantic import BaseModel
 from typing import Optional, Any
 import hashlib, hmac, json, os, datetime, requests, uuid, time, asyncio
 from collections import defaultdict
+from pathlib import Path
 
-app = FastAPI(title="Athena CAP Bridge v2", version="2.2")
+app = FastAPI(title="Athena CAP Bridge v2", version="2.3")
 
 # =========================================================
 # Configuration
 # =========================================================
 SHARED_SECRET = os.getenv("ATHENA_SHARED_SECRET", "super_secret_shared_key_123!")
 BRIDGE_URL = os.getenv("BRIDGE_URL", None)
-RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))  # per IP per minute
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))  # requests/IP/min
 LOG_PATH = os.getenv("LOG_PATH", "logs/bridge_log.jsonl")
+MAX_LOG_LINES = int(os.getenv("MAX_LOG_LINES", "1000"))  # keep last 1000 lines
 
 # Ensure log directory exists
-os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+Path(os.path.dirname(LOG_PATH)).mkdir(parents=True, exist_ok=True)
 
 # =========================================================
-# Rate limiting (token bucket per IP)
+# Rate limiting
 # =========================================================
 rate_bucket = defaultdict(lambda: {"tokens": RATE_LIMIT, "timestamp": time.time()})
 
@@ -29,14 +31,13 @@ def check_rate_limit(ip: str) -> bool:
     refill = elapsed * (RATE_LIMIT / 60.0)
     bucket["tokens"] = min(RATE_LIMIT, bucket["tokens"] + refill)
     bucket["timestamp"] = now
-
     if bucket["tokens"] >= 1:
         bucket["tokens"] -= 1
         return True
     return False
 
 # =========================================================
-# Data model
+# Models
 # =========================================================
 class CAPPayload(BaseModel):
     cap_id: str
@@ -51,20 +52,32 @@ class CAPPayload(BaseModel):
 # =========================================================
 # Logging helpers
 # =========================================================
+def prune_logs():
+    """Keep only the last N lines to prevent disk growth."""
+    try:
+        path = Path(LOG_PATH)
+        if not path.exists():
+            return
+        lines = path.read_text().splitlines()
+        if len(lines) > MAX_LOG_LINES:
+            path.write_text("\n".join(lines[-MAX_LOG_LINES:]) + "\n")
+    except Exception as e:
+        print(f"[WARN] Failed to prune logs: {e}")
+
 def log_json(event: str, data: dict):
-    """Structured JSON logger (file + stdout for Render visibility)."""
-    entry = {
-        "event": event,
-        "time": datetime.datetime.utcnow().isoformat(),
-        **data,
-    }
+    """Structured JSON logger (writes to file + stdout)."""
+    entry = {"event": event, "time": datetime.datetime.utcnow().isoformat(), **data}
     line = json.dumps(entry)
-    with open(LOG_PATH, "a") as f:
-        f.write(line + "\n")
+    try:
+        with open(LOG_PATH, "a") as f:
+            f.write(line + "\n")
+        prune_logs()
+    except Exception as e:
+        print(f"[ERROR] Logging failed: {e}")
     print(line, flush=True)
 
 # =========================================================
-# Health & metrics
+# Metrics and Health
 # =========================================================
 metrics = {
     "start_time": datetime.datetime.utcnow().isoformat(),
@@ -97,7 +110,7 @@ def root():
     return {"status": "alive", "time": datetime.datetime.utcnow().isoformat()}
 
 # =========================================================
-# Core CAP receiver
+# CAP Receiver
 # =========================================================
 @app.post("/cap")
 async def receive_cap(request: Request, x_athena_signature: Optional[str] = Header(None)):
@@ -113,7 +126,7 @@ async def receive_cap(request: Request, x_athena_signature: Optional[str] = Head
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # HMAC validation
+    # HMAC verification
     computed_sig = hmac.new(SHARED_SECRET.encode(), body, hashlib.sha256).hexdigest()
     if x_athena_signature != computed_sig:
         raise HTTPException(status_code=401, detail="Invalid signature")
@@ -151,7 +164,7 @@ async def receive_cap(request: Request, x_athena_signature: Optional[str] = Head
     }
 
 # =========================================================
-# Log retrieval endpoint
+# Logs API
 # =========================================================
 @app.get("/logs")
 def read_logs():
