@@ -12,7 +12,7 @@ app = FastAPI(title="Athena CAP Bridge v2", version="2.2")
 SHARED_SECRET = os.getenv("ATHENA_SHARED_SECRET", "super_secret_shared_key_123!")
 BRIDGE_URL = os.getenv("BRIDGE_URL", None)
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))  # per IP per minute
-LOG_PATH = os.getenv("LOG_PATH", "/data/bridge_log.jsonl")
+LOG_PATH = os.getenv("LOG_PATH", "logs/bridge_log.jsonl")
 
 # Ensure log directory exists
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
