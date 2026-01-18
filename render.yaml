@@ -13,8 +13,6 @@ services:
         value: "1"
       - key: LOG_PATH
         value: logs/bridge_log.jsonl
-    disk:
-      name: bridge-data
-      mountPath: /data
-      sizeGB: 1
+      - key: MAX_LOG_LINES
+        value: "1000"
     plan: free
