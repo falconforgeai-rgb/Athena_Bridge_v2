@@ -9,10 +9,10 @@ services:
         value: super_secret_shared_key_123!
       - key: RATE_LIMIT
         value: "10"
-      - key: PYTHONUNBUFFERED
-        value: "1"
-      - key: LOG_PATH
-        value: logs/bridge_log.jsonl
+      - key: LOG_DIR
+        value: logs
       - key: MAX_LOG_LINES
         value: "1000"
+      - key: ARCHIVE_DAYS
+        value: "7"
     plan: free
